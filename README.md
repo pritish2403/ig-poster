@@ -24,7 +24,7 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 
 | Name | Value |
 | --- | --- |
-| `IG_USER_ID` | `17841426757295539` |
+| `IG_USER_ID` | `ID` |
 | `IG_ACCESS_TOKEN` | your Instagram token (ideally the non-expiring Page token) |
 
 ### 3. Enable Actions
