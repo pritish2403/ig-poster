@@ -1,0 +1,41 @@
+name: Post due reels
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes (GitHub may run a few min late)
+  workflow_dispatch: {}        # lets you run it manually from the Actions tab (for testing)
+  repository_dispatch:
+    types: [trigger-post]      # allows external services to trigger this exactly on time
+
+# Never let two runs overlap and fight over schedule.json.
+concurrency:
+  group: poster
+  cancel-in-progress: false
+
+permissions:
+  contents: write              # needed to commit the updated schedule.json back
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Post any reels that are due
+        env:
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: python post_due.py
+
+      - name: Save updated schedule state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add schedule.json
+          if git diff --cached --quiet; then
+            echo "No schedule changes to commit."
+          else
+            git commit -m "Update posting status"
+            git pull --rebase --autostash
+            git push
+          fi
