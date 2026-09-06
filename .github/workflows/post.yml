@@ -25,6 +25,8 @@ jobs:
         env:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          SPOON_IG_USER_ID: ${{ secrets.SPOON_IG_USER_ID }}
+          SPOON_IG_ACCESS_TOKEN: ${{ secrets.SPOON_IG_ACCESS_TOKEN }}
         run: python post_due.py
 
       - name: Save updated schedule state

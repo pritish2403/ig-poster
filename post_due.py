@@ -8,9 +8,8 @@ has arrived and that hasn't been posted yet, it:
   3. publishes it,
   4. records the result back into schedule.json.
 
-Stdlib only (no pip installs needed). Reads IG_USER_ID and IG_ACCESS_TOKEN from
-environment (GitHub repo secrets). Clip URLs are derived automatically from the
-repository, so nothing is hardcoded.
+Stdlib only (no pip installs needed). Reads the account credentials from
+GitHub Actions secrets. Clip URLs are derived automatically from the repository.
 """
 
 import json
@@ -19,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 GRAPH_API = "https://graph.facebook.com/v23.0"
@@ -28,8 +27,16 @@ MAX_ATTEMPTS = 5            # give up on a clip after this many failed tries
 CONTAINER_POLL_SECONDS = 5
 CONTAINER_MAX_WAIT = 240    # seconds to wait for Instagram to process one reel
 
-IG_USER_ID = os.environ.get("IG_USER_ID", "").strip()
-IG_TOKEN = os.environ.get("IG_ACCESS_TOKEN", "").strip()
+ACCOUNTS = {
+    "parts": (
+        os.environ.get("IG_USER_ID", "").strip(),
+        os.environ.get("IG_ACCESS_TOKEN", "").strip(),
+    ),
+    "spoon": (
+        os.environ.get("SPOON_IG_USER_ID", "").strip(),
+        os.environ.get("SPOON_IG_ACCESS_TOKEN", "").strip(),
+    ),
+}
 # GitHub sets these automatically inside Actions, e.g. "user/repo" and "main".
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip()
 GITHUB_REF_NAME = os.environ.get("GITHUB_REF_NAME", "main").strip() or "main"
@@ -67,7 +74,7 @@ def clip_url(filename):
     return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{GITHUB_REF_NAME}/clips/{quoted}"
 
 
-def post_reel(item):
+def post_reel(item, user_id, token):
     video_url = clip_url(item["file"])
     print(f"  video_url = {video_url}")
 
@@ -75,7 +82,7 @@ def post_reel(item):
         "media_type": "REELS",
         "video_url": video_url,
         "caption": item.get("caption", ""),
-        "access_token": IG_TOKEN,
+        "access_token": token,
     }
     # Meta fetches the cover image from this public HTTPS URL when provided.
     cover_url = str(item.get("cover_url", "")).strip()
@@ -83,7 +90,7 @@ def post_reel(item):
         media_data["cover_url"] = cover_url
 
     container = graph_request(
-        "POST", f"/{IG_USER_ID}/media",
+        "POST", f"/{user_id}/media",
         data=media_data,
         timeout=120,
     )
@@ -96,7 +103,7 @@ def post_reel(item):
     while True:
         status = graph_request(
             "GET", f"/{container_id}",
-            params={"fields": "status_code", "access_token": IG_TOKEN},
+            params={"fields": "status_code", "access_token": token},
         )
         code = str(status.get("status_code", "IN_PROGRESS")).upper()
         if code == "FINISHED":
@@ -109,8 +116,8 @@ def post_reel(item):
         waited += CONTAINER_POLL_SECONDS
 
     published = graph_request(
-        "POST", f"/{IG_USER_ID}/media_publish",
-        data={"creation_id": container_id, "access_token": IG_TOKEN},
+        "POST", f"/{user_id}/media_publish",
+        data={"creation_id": container_id, "access_token": token},
         timeout=120,
     )
     media_id = str(published.get("id", "")).strip()
@@ -119,14 +126,32 @@ def post_reel(item):
 
     details = graph_request(
         "GET", f"/{media_id}",
-        params={"fields": "permalink", "access_token": IG_TOKEN},
+        params={"fields": "permalink", "access_token": token},
     )
     return media_id, details.get("permalink", "")
 
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def next_daily_post_at(item, after):
+    """Return the next fixed IST occurrence after the supplied time."""
+    times = item.get("post_times_ist") or ["11:00", "17:30"]
+    candidates = []
+    local_day = after.astimezone(IST).date()
+    for day_offset in range(0, 3):
+        day = local_day + timedelta(days=day_offset)
+        for value in times:
+            hour, minute = (int(part) for part in str(value).split(":"))
+            candidate = datetime(day.year, day.month, day.day, hour, minute, tzinfo=IST).astimezone(timezone.utc)
+            if candidate > after:
+                candidates.append(candidate)
+    if not candidates:
+        raise RuntimeError("Could not calculate the next Spoon posting time")
+    return min(candidates)
+
+
 def main():
-    if not IG_USER_ID or not IG_TOKEN:
-        raise SystemExit("Missing IG_USER_ID / IG_ACCESS_TOKEN secrets.")
     if not SCHEDULE_FILE.exists():
         print("No schedule.json — nothing to do.")
         return
@@ -138,7 +163,13 @@ def main():
     posted = 0
 
     for item in items:
-        if item.get("posted"):
+        account = str(item.get("account", "parts")).lower()
+        user_id, token = ACCOUNTS.get(account, ("", ""))
+        if not user_id or not token:
+            print(f"Skipping {item.get('file', '?')}: missing secrets for account '{account}'.")
+            continue
+        recurring = item.get("repeat") == "daily"
+        if item.get("posted") and not recurring:
             continue
         if item.get("attempts", 0) >= MAX_ATTEMPTS:
             continue
@@ -155,11 +186,17 @@ def main():
         if post_at > now:
             continue  # not due yet
 
-        print(f"Posting due reel: {item['file']} (scheduled {item['post_at']})")
+        print(f"Posting due reel: {item['file']} for {account} (scheduled {item['post_at']})")
         item["attempts"] = item.get("attempts", 0) + 1
         try:
-            media_id, permalink = post_reel(item)
-            item["posted"] = True
+            media_id, permalink = post_reel(item, user_id, token)
+            if recurring:
+                item["posted"] = False
+                item["last_post_at"] = item["post_at"]
+                item["post_at"] = next_daily_post_at(item, now)
+                item["attempts"] = 0
+            else:
+                item["posted"] = True
             item["media_id"] = media_id
             item["permalink"] = permalink
             item["error"] = None
