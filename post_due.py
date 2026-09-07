@@ -71,11 +71,15 @@ def graph_request(method, path, *, params=None, data=None, timeout=60):
 def clip_url(filename):
     """Public raw URL of a clip committed under clips/ in this repo."""
     quoted = urllib.parse.quote(filename)
+    if filename.startswith("http://") or filename.startswith("https://"):
+        return filename
+    if filename.startswith("repo:"):
+        return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{GITHUB_REF_NAME}/{urllib.parse.quote(filename[5:], safe='/')}"
     return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{GITHUB_REF_NAME}/clips/{quoted}"
 
 
 def post_reel(item, user_id, token):
-    video_url = clip_url(item["file"])
+    video_url = clip_url(item.get("repo_path") or item["file"])
     print(f"  video_url = {video_url}")
 
     media_data = {
